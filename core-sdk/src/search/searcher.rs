@@ -9,10 +9,9 @@ use super::MATED_IN_MAX;
 use super::MAX_SEARCH_DEPTH;
 use crate::board_representation::game_state::{GameState, WHITE};
 //use crate::logging::log;
-use crate::board_representation::game_state_attack_container::GameStateAttackContainer;
 use crate::move_generation::makemove::make_move;
 use crate::move_generation::movegen::{generate_moves, MoveList};
-use crate::search::reserved_memory::{ReservedAttackContainer, ReservedMoveList};
+use crate::search::reserved_memory::ReservedMoveList;
 use crate::search::{CombinedSearchParameters, ScoredPrincipalVariation, MATE_SCORE};
 use crate::UCIOptions;
 use std::cell::UnsafeCell;
@@ -111,10 +110,13 @@ impl InterThreadCommunicationSystem {
             itcs_tx.push(tx);
             let tx_f = itcs.tx_f.clone();
             let self_arc = Arc::clone(&itcs);
-            thread::spawn(move || {
-                let mut thread = Thread::new(id, self_arc, rx, tx_f);
-                thread.run();
-            });
+            thread::Builder::new()
+                .stack_size(12 * 1024 * 1024)
+                .spawn(move || {
+                    let mut thread = Thread::new(id, self_arc, rx, tx_f);
+                    thread.run();
+                })
+                .expect("Could not build thread");
         }
     }
 
@@ -170,7 +172,11 @@ impl InterThreadCommunicationSystem {
             } else {
                 self.cache_status.load(Ordering::Relaxed)
             };
-            let score_string = if scored_pv.score.abs() > MATE_SCORE - 200 {
+            let score_string = if cfg!(feature = "avoid-adj") {
+                let score = scored_pv.score.min(200).max(-200);
+                let score = if score.abs() < 10 { 25 } else { score };
+                format!("score cp {}", score)
+            } else if scored_pv.score.abs() > MATE_SCORE - 200 {
                 let dtm = if scored_pv.score > 0 {
                     (MATE_SCORE - scored_pv.score) / 2 + 1
                 } else {
@@ -251,7 +257,6 @@ pub struct Thread {
     pub root_plies_played: usize,
     pub history: History,
     pub movelist: ReservedMoveList,
-    pub attack_container: ReservedAttackContainer,
     pub pv_table: Vec<PrincipalVariation>,
     pub killer_moves: [[Option<GameMove>; 2]; MAX_SEARCH_DEPTH],
     pub quiets_tried: [[Option<GameMove>; 128]; MAX_SEARCH_DEPTH],
@@ -280,7 +285,7 @@ impl Thread {
         self.itcs.register_pv(&scored_pv, no_fail);
         self.current_pv = scored_pv;
         self.pv_applicable.clear();
-        self.pv_applicable.push(root.hash);
+        self.pv_applicable.push(root.get_hash());
         let mut next_state = None;
         for mv in self.current_pv.pv.pv.iter() {
             if let Some(mv) = mv {
@@ -289,7 +294,8 @@ impl Thread {
                 } else {
                     next_state = Some(make_move(next_state.as_ref().unwrap(), *mv));
                 }
-                self.pv_applicable.push(next_state.as_ref().unwrap().hash);
+                self.pv_applicable
+                    .push(next_state.as_ref().unwrap().get_hash());
             } else {
                 break;
             }
@@ -311,7 +317,6 @@ impl Thread {
             root_plies_played: 0,
             history: History::default(),
             movelist: ReservedMoveList::default(),
-            attack_container: ReservedAttackContainer::default(),
             pv_table,
             killer_moves: [[None; 2]; MAX_SEARCH_DEPTH],
             quiets_tried: [[None; 128]; MAX_SEARCH_DEPTH],
@@ -340,7 +345,8 @@ impl Thread {
                     break;
                 }
                 ThreadInstruction::StartSearch(max_depth, state, tc, history, time_saved) => {
-                    self.root_plies_played = (state.full_moves - 1) * 2 + state.color_to_move;
+                    self.root_plies_played =
+                        (state.get_full_moves() - 1) * 2 + state.get_color_to_move();
                     self.history = history;
                     self.time_saved = time_saved;
                     self.pv_applicable.clear();
@@ -405,7 +411,11 @@ impl Thread {
                         beta,
                         curr_depth as i16,
                         &state,
-                        if state.color_to_move == WHITE { 1 } else { -1 },
+                        if state.get_color_to_move() == WHITE {
+                            1
+                        } else {
+                            -1
+                        },
                         0,
                     ),
                     self,
@@ -481,17 +491,13 @@ pub fn search_move(
     *itcs.start_time.write().unwrap() = Instant::now();
     *itcs.last_cache_status.lock().unwrap() = None;
     itcs.cache_status.store(0, Ordering::Relaxed);
+    itcs.cache().increase_age();
     *itcs.timeout_flag.write().unwrap() = false;
 
     let time_saved_before = itcs.saved_time.load(Ordering::Relaxed);
     //Step 1. Check how many legal moves there are
     let mut movelist = MoveList::default();
-    generate_moves(
-        &game_state,
-        false,
-        &mut movelist,
-        &GameStateAttackContainer::from_state(&game_state),
-    );
+    generate_moves(&game_state, false, &mut movelist);
 
     //Step2. Check legal moves
     if movelist.move_list.is_empty() {
@@ -510,8 +516,8 @@ pub fn search_move(
     let mut hist: History = History::default();
     let mut relevant_hashes: Vec<u64> = Vec::with_capacity(100);
     for gs in history.iter().rev() {
-        relevant_hashes.push(gs.hash);
-        if gs.half_moves == 0 {
+        relevant_hashes.push(gs.get_hash());
+        if gs.get_half_moves() == 0 {
             break;
         }
     }

@@ -102,15 +102,15 @@ pub fn get_pgn_string(
     //Move Text section
     let mut start_pos = GameState::from_fen(&metadata.starting_position);
     let mut move_text = String::new();
-    if start_pos.color_to_move == BLACK {
-        move_text.push_str(&format!("{}... ", start_pos.full_moves));
+    if start_pos.get_color_to_move() == BLACK {
+        move_text.push_str(&format!("{}... ", start_pos.get_full_moves()));
     } else {
-        move_text.push_str(&format!("{}. ", start_pos.full_moves));
+        move_text.push_str(&format!("{}. ", start_pos.get_full_moves()));
     }
     if opening_comment.is_some() && opening_comment.unwrap() == 0 {
         move_text.push_str("{Opening book has ended} ");
     }
-    let mut current_color = start_pos.color_to_move;
+    let mut current_color = start_pos.get_color_to_move();
     for (index, mv) in moves.iter().enumerate() {
         move_text.push_str(&format!("{} ", mv.to_san(&start_pos)));
         if opening_comment.is_some() && (index + 1) == opening_comment.unwrap() {
@@ -118,7 +118,7 @@ pub fn get_pgn_string(
         }
         start_pos = make_move(&start_pos, *mv);
         if current_color == BLACK && index < moves.len() - 1 {
-            move_text.push_str(&format!("{}. ", start_pos.full_moves));
+            move_text.push_str(&format!("{}. ", start_pos.get_full_moves()));
         }
         current_color = 1 - current_color;
     }
@@ -152,7 +152,6 @@ pub fn get_pgn_string(
 mod tests {
     use crate::pgn::pgn_writer::PGNMetadata;
     use core_sdk::board_representation::game_state::*;
-    use core_sdk::board_representation::game_state_attack_container::GameStateAttackContainer;
     use core_sdk::move_generation::makemove::make_move;
     use core_sdk::move_generation::movegen;
     use rand::Rng;
@@ -160,21 +159,19 @@ mod tests {
     #[test]
     fn pgn_writer_test() {
         let mut movelist = movegen::MoveList::default();
-        let mut attack_container = GameStateAttackContainer::default();
         let mut rng = rand::thread_rng();
         let mut g = GameState::from_fen("rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -");
         let mut moves = Vec::with_capacity(100);
         let mut res = GameResult::Ingame;
         loop {
-            attack_container.write_state(&g);
-            let agsi = movegen::generate_moves(&g, false, &mut movelist, &attack_container);
-            if !agsi.stm_haslegalmove || g.half_moves >= 100 {
-                if g.half_moves >= 100 {
+            let agsi = movegen::generate_moves(&g, false, &mut movelist);
+            if movelist.move_list.is_empty() || g.get_half_moves() >= 100 {
+                if g.get_half_moves() >= 100 {
                     res = GameResult::Draw;
                 }
-                if !agsi.stm_haslegalmove {
+                if movelist.move_list.is_empty() {
                     if agsi.stm_incheck {
-                        if g.color_to_move == WHITE {
+                        if g.get_color_to_move() == WHITE {
                             res = GameResult::BlackWin;
                         } else {
                             res = GameResult::WhiteWin;

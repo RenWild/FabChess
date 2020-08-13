@@ -1,12 +1,11 @@
 use core_sdk::board_representation::game_state::GameState;
-use core_sdk::move_generation::magic::{
-    generate_rook_patterns, print_bishop_magics, print_rook_magics, rook_attacks_slow,
-};
-use core_sdk::move_generation::movegen::{bishop_attack, rook_attack};
+use core_sdk::evaluation::parameters::Parameters;
 use core_sdk::search::cache::Cache;
 use core_sdk::search::searcher::{search_move, InterThreadCommunicationSystem};
 use core_sdk::search::timecontrol::TimeControl;
-use extended_sdk::misc::to_string_board;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 
 fn main() {
@@ -18,9 +17,11 @@ fn main() {
             panic!("yup");
         }
     }*/
-    print_bishop_magics();
-    print_rook_magics();
     //go_infinite_from_startpos();
+    let param_string = format!("{}", Parameters::default());
+    let param_file = Path::new("parameters.txt");
+    let mut file = File::create(param_file).unwrap();
+    write!(file, "{}", param_string).unwrap();
 }
 fn go_infinite_from_startpos() {
     let itcs = Arc::new(InterThreadCommunicationSystem::default());

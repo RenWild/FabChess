@@ -9,7 +9,6 @@ pub mod statistics;
 pub mod timecontrol;
 
 use crate::board_representation::game_state::*;
-use crate::board_representation::game_state_attack_container::GameStateAttackContainer;
 use crate::search::searcher::Thread;
 use crate::search::timecontrol::TimeControlInformation;
 use history::History;
@@ -19,10 +18,6 @@ pub const MAX_SEARCH_DEPTH: usize = 100;
 pub const MATE_SCORE: i16 = 15000;
 pub const MATED_IN_MAX: i16 = -14000;
 pub const STANDARD_SCORE: i16 = -32767;
-
-pub fn init_constants() {
-    quiescence::PIECE_VALUES.len();
-}
 
 pub struct CombinedSearchParameters<'a> {
     pub alpha: i16,
@@ -115,20 +110,23 @@ pub fn leaf_score(game_status: GameResult, color: i16, current_depth: i16) -> i1
 //Doesn't actually check for stalemate
 #[inline(always)]
 pub fn check_for_draw(game_state: &GameState, history: &History) -> SearchInstruction {
-    if game_state.pieces[PAWN][WHITE]
-        | game_state.pieces[ROOK][WHITE]
-        | game_state.pieces[QUEEN][WHITE]
-        | game_state.pieces[PAWN][BLACK]
-        | game_state.pieces[ROOK][BLACK]
-        | game_state.pieces[QUEEN][BLACK]
+    if game_state.get_piece_bb(PieceType::Pawn)
+        | game_state.get_piece_bb(PieceType::Rook)
+        | game_state.get_piece_bb(PieceType::Queen)
         == 0u64
-        && (game_state.pieces[KNIGHT][WHITE] | game_state.pieces[BISHOP][WHITE]).count_ones() <= 1
-        && (game_state.pieces[KNIGHT][BLACK] | game_state.pieces[BISHOP][BLACK]).count_ones() <= 1
+        && (game_state.get_piece(PieceType::Knight, WHITE)
+            | game_state.get_piece(PieceType::Bishop, WHITE))
+        .count_ones()
+            <= 1
+        && (game_state.get_piece(PieceType::Knight, BLACK)
+            | game_state.get_piece(PieceType::Bishop, BLACK))
+        .count_ones()
+            <= 1
     {
         return SearchInstruction::StopSearching(0);
     }
 
-    if game_state.half_moves >= 100 {
+    if game_state.get_half_moves() >= 100 {
         return SearchInstruction::StopSearching(0);
     }
 
@@ -145,7 +143,7 @@ pub fn check_end_condition(
     in_check: bool,
 ) -> GameResult {
     if in_check && !has_legal_moves {
-        if game_state.color_to_move == WHITE {
+        if game_state.get_color_to_move() == WHITE {
             return GameResult::BlackWin;
         } else {
             return GameResult::WhiteWin;
@@ -177,13 +175,6 @@ pub fn concatenate_pv(at_depth: usize, thread: &mut Thread) {
         thread.pv_table[at_depth].pv[index + 1] = None;
         index += 1;
     }
-}
-
-#[inline(always)]
-pub fn in_check(game_state: &GameState, attack_container: &GameStateAttackContainer) -> bool {
-    (game_state.pieces[KING][game_state.color_to_move]
-        & attack_container.attacks_sum[1 - game_state.color_to_move])
-        != 0u64
 }
 
 #[inline(always)]

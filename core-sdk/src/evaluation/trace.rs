@@ -1,5 +1,5 @@
+use crate::board_representation::game_state::{BLACK, PIECE_TYPES, WHITE};
 use crate::evaluation::parameters::Parameters;
-use crate::board_representation::game_state::{BLACK, WHITE};
 use crate::evaluation::{EG, MG};
 
 pub struct Trace {
@@ -51,12 +51,7 @@ pub struct Trace {
     pub bishop_safe_check: [u8; 2],
     pub rook_safe_check: [u8; 2],
     pub queen_safe_check: [u8; 2],
-    pub psqt_pawn: [[i8; 8]; 8],
-    pub psqt_knight: [[i8; 8]; 8],
-    pub psqt_bishop: [[i8; 8]; 8],
-    pub psqt_rook: [[i8; 8]; 8],
-    pub psqt_queen: [[i8; 8]; 8],
-    pub psqt_king: [[i8; 8]; 8],
+    pub psqt: [[[i8; 8]; 8]; 6],
     pub phase: f64,
 }
 
@@ -87,12 +82,13 @@ impl Trace {
     pub fn evaluate(&self, params: &Parameters) -> f64 {
         //PSQT Evaluation
         let mut psqt_res = (0., 0.);
-        evaluate_psqt(&mut psqt_res, &self.psqt_pawn, &params.psqt_pawn);
-        evaluate_psqt(&mut psqt_res, &self.psqt_knight, &params.psqt_knight);
-        evaluate_psqt(&mut psqt_res, &self.psqt_bishop, &params.psqt_bishop);
-        evaluate_psqt(&mut psqt_res, &self.psqt_rook, &params.psqt_rook);
-        evaluate_psqt(&mut psqt_res, &self.psqt_queen, &params.psqt_queen);
-        evaluate_psqt(&mut psqt_res, &self.psqt_king, &params.psqt_king);
+        for pt in PIECE_TYPES.iter() {
+            evaluate_psqt(
+                &mut psqt_res,
+                &self.psqt[*pt as usize],
+                &params.psqt[*pt as usize],
+            )
+        }
 
         //Knight evaluation
         let mut knight_res = (0., 0.);
@@ -426,12 +422,7 @@ impl Trace {
             bishop_safe_check: [0; 2],
             rook_safe_check: [0; 2],
             queen_safe_check: [0; 2],
-            psqt_pawn: [[0; 8]; 8],
-            psqt_knight: [[0; 8]; 8],
-            psqt_bishop: [[0; 8]; 8],
-            psqt_rook: [[0; 8]; 8],
-            psqt_queen: [[0; 8]; 8],
-            psqt_king: [[0; 8]; 8],
+            psqt: [[[0; 8]; 8]; 6],
             phase: 0.,
         }
     }
@@ -444,7 +435,7 @@ mod tests {
     #[cfg(feature = "texel-tuning")]
     use crate::board_representation::game_state::GameState;
     #[cfg(feature = "texel-tuning")]
-    use crate::evaluation::eval_game_state_from_null;
+    use crate::evaluation::eval_game_state;
 
     #[test]
     #[ignore]
@@ -553,7 +544,7 @@ r3k2r/1pqb2p1/p4p2/P2npP2/2pB2Bp/2P4P/2P1Q1P1/R4RK1 w kq - 0 21
             let new_linesplit = positions.split("\n").collect::<Vec<&str>>();
             for line in new_linesplit {
                 let position = GameState::from_fen(line);
-                let evaluation = eval_game_state_from_null(&position);
+                let evaluation = eval_game_state(&position, 0, 0);
                 let trace_eval = evaluation.trace.evaluate(&params) as i16;
                 //Rounding erros can make up for max 2 error (only 2 place where rounding can make a difference )
                 if (evaluation.final_eval - trace_eval).abs() > 2 {

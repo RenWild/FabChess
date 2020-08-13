@@ -1,7 +1,6 @@
 use crate::async_communication::{stderr_listener, write_all};
 use crate::engine::{EndConditionInformation, EngineReaction, EngineStatus, PlayTask, TaskResult};
 use core_sdk::board_representation::game_state::*;
-use core_sdk::board_representation::game_state_attack_container::GameStateAttackContainer;
 use core_sdk::move_generation::makemove::make_move;
 use core_sdk::move_generation::movegen;
 use log::warn;
@@ -22,16 +21,14 @@ pub async fn cleanup(mut e1: Child, mut e2: Child, e1_err: JoinHandle<()>, e2_er
 }
 pub async fn play_game(mut task: PlayTask) -> TaskResult {
     let mut movelist = movegen::MoveList::default();
-    let mut attack_container = GameStateAttackContainer::default();
     //-------------------------------------------------------------
     //Set game up
     let opening_fen = task.opening.to_fen();
-    attack_container.write_state(&task.opening);
-    let agsi = movegen::generate_moves(&task.opening, false, &mut movelist, &attack_container);
+    let agsi = movegen::generate_moves(&task.opening, false, &mut movelist);
     let mut history: Vec<GameState> = Vec::with_capacity(100);
     let mut status = check_end_condition(
         &task.opening,
-        agsi.stm_haslegalmove,
+        !movelist.move_list.is_empty(),
         agsi.stm_incheck,
         &history,
     )
@@ -78,8 +75,8 @@ pub async fn play_game(mut task: PlayTask) -> TaskResult {
     while let GameResult::Ingame = status {
         //Request move
         let latest_state = &history[history.len() - 1];
-        let player1_move = task.p1_is_white && latest_state.color_to_move == 0
-            || !task.p1_is_white && latest_state.color_to_move == 1;
+        let player1_move = task.p1_is_white && latest_state.get_color_to_move() == 0
+            || !task.p1_is_white && latest_state.get_color_to_move() == 1;
         //Prepare position string
         let mut position_string = String::new();
         position_string.push_str("position fen ");
@@ -204,12 +201,16 @@ pub async fn play_game(mut task: PlayTask) -> TaskResult {
         //Make new state with move
         move_history.push(game_move);
         let state = make_move(latest_state, game_move);
-        if state.full_moves < 35 {
+        if state.get_full_moves() < 35 {
             draw_adjudication = 0;
         }
-        attack_container.write_state(&state);
-        let agsi = movegen::generate_moves(&state, false, &mut movelist, &attack_container);
-        let check = check_end_condition(&state, agsi.stm_haslegalmove, agsi.stm_incheck, &history);
+        let agsi = movegen::generate_moves(&state, false, &mut movelist);
+        let check = check_end_condition(
+            &state,
+            !movelist.move_list.is_empty(),
+            agsi.stm_incheck,
+            &history,
+        );
         history.push(state);
         status = check.0;
         endcondition = check.1;
@@ -275,7 +276,7 @@ pub fn check_end_condition(
     in_check: bool,
     history: &[GameState],
 ) -> (GameResult, Option<EndConditionInformation>) {
-    let enemy_win = if game_state.color_to_move == 0 {
+    let enemy_win = if game_state.get_color_to_move() == 0 {
         GameResult::BlackWin
     } else {
         GameResult::WhiteWin
@@ -288,16 +289,8 @@ pub fn check_end_condition(
     }
 
     //Missing pieces
-    if game_state.pieces[PAWN][WHITE]
-        | game_state.pieces[KNIGHT][WHITE]
-        | game_state.pieces[BISHOP][WHITE]
-        | game_state.pieces[ROOK][WHITE]
-        | game_state.pieces[QUEEN][WHITE]
-        | game_state.pieces[PAWN][BLACK]
-        | game_state.pieces[KNIGHT][BLACK]
-        | game_state.pieces[BISHOP][BLACK]
-        | game_state.pieces[ROOK][BLACK]
-        | game_state.pieces[QUEEN][BLACK]
+    if game_state.get_pieces_from_side_without_king(WHITE)
+        | game_state.get_pieces_from_side_without_king(BLACK)
         == 0u64
     {
         return (
@@ -305,7 +298,7 @@ pub fn check_end_condition(
             Some(EndConditionInformation::DrawByMissingPieces),
         );
     }
-    if game_state.half_moves >= 100 {
+    if game_state.get_half_moves() >= 100 {
         return (
             GameResult::Draw,
             Some(EndConditionInformation::HundredMoveDraw),
@@ -324,7 +317,7 @@ pub fn check_end_condition(
 pub fn get_occurences(history: &[GameState], state: &GameState) -> usize {
     let mut occ = 0;
     for other in history {
-        if other.hash == state.hash {
+        if other.get_hash() == state.get_hash() {
             occ += 1;
         }
     }

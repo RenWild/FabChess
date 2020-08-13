@@ -6,8 +6,10 @@ use crate::evaluation::eval_game_state;
 use crate::move_generation::makemove::{make_move, make_nullmove};
 use crate::search::cache::{CacheEntry, INVALID_STATIC_EVALUATION};
 use crate::search::moveordering::{MoveOrderer, NORMAL_STAGES};
+use crate::search::quiescence::{piece_value, see};
 use crate::search::searcher::Thread;
 
+pub const LMP_DEPTH: usize = 4;
 pub const FUTILITY_MARGIN: i16 = 90;
 pub const FUTILITY_DEPTH: i16 = 6;
 pub const STATIC_NULL_MOVE_MARGIN: i16 = 120;
@@ -41,15 +43,14 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
     }
 
     //Step 2. Max Search depth reached
-    if let SearchInstruction::StopSearching(res) = max_depth(&p, thread) {
+    if let SearchInstruction::StopSearching(res) = max_depth(&p) {
         return res;
     }
 
     //Step 3. Check for draw or mate distance pruning if not root (need best move at root)
     if !root {
-        if let SearchInstruction::StopSearching(res) = check_for_draw(p.game_state, &thread.history)
-        {
-            return res;
+        if let SearchInstruction::StopSearching(r) = check_for_draw(p.game_state, &thread.history) {
+            return r;
         }
         //Mate distance pruning
         if let SearchInstruction::StopSearching(res) = mate_distance_pruning(&mut p) {
@@ -64,11 +65,7 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
     }
 
     //Step 4. Attacks and in check  flag
-    thread.attack_container.attack_containers[p.current_depth].write_state(p.game_state);
-    let incheck = in_check(
-        p.game_state,
-        &thread.attack_container.attack_containers[p.current_depth],
-    );
+    let incheck = p.game_state.in_check();
 
     //Step 5. Check extensions if not at root
     if incheck && !root {
@@ -88,12 +85,7 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
     //Step 8. TT Lookup
     //TODO Correctly insert and retrieve mates into the TT
     let mut tt_entry: Option<CacheEntry> = None;
-    if let SearchInstruction::StopSearching(res) =
-        thread
-            .itcs
-            .cache()
-            .lookup(&p, &mut tt_entry, thread.root_plies_played)
-    {
+    if let SearchInstruction::StopSearching(res) = thread.itcs.cache().lookup(&p, &mut tt_entry) {
         #[cfg(feature = "search-statistics")]
         {
             thread.search_statistics.add_cache_hit_aj_replace_ns();
@@ -122,11 +114,11 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
     };
     thread
         .history
-        .push(p.game_state.hash, p.game_state.half_moves == 0);
+        .push(p.game_state.get_hash(), p.game_state.get_half_moves() == 0);
 
     //Step 9. Static Eval if needed
     let prunable = !is_pv_node && !incheck;
-    make_eval(&p, thread, &mut static_evaluation, prunable);
+    make_eval(&p, &mut static_evaluation, prunable);
 
     //Step 10. Prunings
     if prunable {
@@ -160,14 +152,14 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
     let mut current_max_score = STANDARD_SCORE;
     let mut index: usize = 0;
     let mut quiets_tried: usize = 0;
+    let mut search_quiets = true;
     let mut move_orderer = MoveOrderer {
         stage: 0,
         stages: &NORMAL_STAGES,
         gen_only_captures: false,
-        has_legal_move: false,
     };
     loop {
-        let mv = move_orderer.next(thread, &p, pv_table_move, tt_move);
+        let mv = move_orderer.next(thread, &p, pv_table_move, tt_move, search_quiets);
         if mv.is_none() {
             break;
         }
@@ -188,12 +180,7 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
         if !root
             && is_quiet_move
             && current_max_score > MATED_IN_MAX
-            && (futil_margin <= p.alpha
-                || p.depth_left <= HISTORY_PRUNING_DEPTH
-                    && thread.history_score[p.game_state.color_to_move][mv.from as usize]
-                        [mv.to as usize]
-                        < HISTORY_PRUNING_THRESHOLD)
-            && p.game_state.has_non_pawns(p.game_state.color_to_move)
+            && p.game_state.has_non_pawns(p.game_state.get_color_to_move())
             && !gives_check
         {
             //Step 14.5. Futility Pruning. Skip quiet moves if futil_margin can't raise alpha
@@ -203,11 +190,12 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
                     thread.search_statistics.add_futil_pruning();
                 }
                 index += 1;
+                search_quiets = false;
                 continue;
             }
             //Step 14.6. History Pruning. Skip quiet moves in low depths if they are below threshold
             if p.depth_left <= HISTORY_PRUNING_DEPTH
-                && thread.history_score[p.game_state.color_to_move][mv.from as usize]
+                && thread.history_score[p.game_state.get_color_to_move()][mv.from as usize]
                     [mv.to as usize]
                     < HISTORY_PRUNING_THRESHOLD
             {
@@ -218,10 +206,21 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
                 index += 1;
                 continue;
             }
+
+            if !incheck
+                && p.depth_left <= LMP_DEPTH as i16
+                && quiets_tried > (3 * 2u32.pow((p.depth_left - 1) as u32)) as usize
+            {
+                index += 1;
+                search_quiets = false;
+                continue;
+            }
             //Step 14.7 SEE Pruning. Skip quiet moves which have negative SEE Score on low depths
-            if p.depth_left <= SEE_PRUNING_DEPTH && false {
-                let see_value = 0.;
-                if see_value < SEE_PRUNING_QUIET_MULT * (p.depth_left as f64 + 3.) {
+            let margin =
+                (SEE_PRUNING_QUIET_MULT * (p.depth_left as f64 * p.depth_left as f64)) as i16;
+            if p.depth_left <= SEE_PRUNING_DEPTH && -piece_value(mv.piece_type) < margin {
+                let see_value = see(p.game_state, mv, true, &mut thread.see_buffer);
+                if see_value < margin {
                     index += 1;
                     continue;
                 }
@@ -231,23 +230,21 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
             && current_max_score > MATED_IN_MAX
             && p.depth_left <= SEE_PRUNING_DEPTH
             && move_score < SEE_PRUNING_CAPTURE_MULT * p.depth_left as f64 * p.depth_left as f64
-            && p.game_state.has_non_pawns(p.game_state.color_to_move)
+            && p.game_state.has_non_pawns(p.game_state.get_color_to_move())
             && !gives_check
         {
             index += 1;
             continue;
         }
+
         //Step 14.7. Late move reductions. Compute reduction based on move type, node type and depth
-        let reduction = if p.depth_left > 2
-            && !incheck
-            && (!isc || move_score < 0.)
-            && index >= 2
-            && (!root || index >= 5)
-        {
-            compute_lmr_reduction(&p, thread, mv, index, isc || isp, gives_check)
-        } else {
-            0
-        };
+        let reduction =
+            if p.depth_left > 2 && (!isc || move_score < 0.) && index >= 2 && (!root || index >= 5)
+            {
+                compute_lmr_reduction(&p, thread, mv, index, isc || isp, gives_check, incheck)
+            } else {
+                0
+            };
 
         let next_state = make_move(p.game_state, mv);
         //Step 14.8. Search the moves
@@ -343,7 +340,7 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
             //Step 14.12 Move does not cause beta cutoff, add to quiet moves tried and update butterfly heuristic
             thread.quiets_tried[p.current_depth][quiets_tried] = Some(mv);
             quiets_tried += 1;
-            thread.bf_score[p.game_state.color_to_move][mv.from as usize][mv.to as usize] +=
+            thread.bf_score[p.game_state.get_color_to_move()][mv.from as usize][mv.to as usize] +=
                 p.depth_left as usize * p.depth_left as usize;
             //TODO: Update bf should maybe also be done in decrement history quiets
         }
@@ -353,9 +350,6 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
 
     thread.history.pop();
 
-    debug_assert!(
-        !move_orderer.has_legal_move || current_max_score > STANDARD_SCORE || thread.self_stop
-    );
     //Step 15. Evaluate leafs correctly
     let game_status =
         check_end_condition(p.game_state, current_max_score > STANDARD_SCORE, incheck);
@@ -377,7 +371,6 @@ pub fn principal_variation_search(mut p: CombinedSearchParameters, thread: &mut 
             thread.pv_table[p.current_depth].pv[0].expect("Can't unwrap move for TT"),
             current_max_score,
             original_alpha,
-            thread.root_plies_played,
             static_evaluation,
         );
     }
@@ -417,18 +410,10 @@ pub fn mate_distance_pruning(p: &mut CombinedSearchParameters) -> SearchInstruct
 }
 
 #[inline(always)]
-pub fn max_depth(p: &CombinedSearchParameters, thread: &mut Thread) -> SearchInstruction {
+pub fn max_depth(p: &CombinedSearchParameters) -> SearchInstruction {
     if p.current_depth >= (MAX_SEARCH_DEPTH - 1) {
-        thread.attack_container.attack_containers[p.current_depth].write_state(p.game_state);
         SearchInstruction::StopSearching(
-            eval_game_state(
-                p.game_state,
-                &thread.attack_container.attack_containers[p.current_depth],
-                p.alpha * p.color,
-                p.beta * p.color,
-            )
-            .final_eval
-                * p.color,
+            eval_game_state(p.game_state, p.alpha * p.color, p.beta * p.color).final_eval * p.color,
         )
     } else {
         SearchInstruction::ContinueSearching
@@ -439,7 +424,7 @@ pub fn max_depth(p: &CombinedSearchParameters, thread: &mut Thread) -> SearchIns
 pub fn get_pvtable_move(p: &CombinedSearchParameters, thread: &Thread) -> Option<GameMove> {
     //PV-Table lookup
     if thread.pv_applicable.len() > (p.current_depth + 1)
-        && thread.pv_applicable[p.current_depth] == p.game_state.hash
+        && thread.pv_applicable[p.current_depth] == p.game_state.get_hash()
     {
         if thread.current_pv.pv.pv[p.current_depth].is_none() {
             println!("Error will occur in thread {}", thread.id);
@@ -456,7 +441,6 @@ pub fn get_pvtable_move(p: &CombinedSearchParameters, thread: &Thread) -> Option
 #[inline(always)]
 pub fn make_eval(
     p: &CombinedSearchParameters,
-    thread: &mut Thread,
     static_evaluation: &mut Option<i16>,
     prunable: bool,
 ) {
@@ -465,12 +449,7 @@ pub fn make_eval(
             && (p.depth_left <= STATIC_NULL_MOVE_DEPTH || p.depth_left >= NULL_MOVE_PRUNING_DEPTH)
             || p.depth_left <= FUTILITY_DEPTH)
     {
-        let eval_res = eval_game_state(
-            p.game_state,
-            &thread.attack_container.attack_containers[p.current_depth],
-            p.alpha * p.color,
-            p.beta * p.color,
-        );
+        let eval_res = eval_game_state(p.game_state, p.alpha * p.color, p.beta * p.color);
         *static_evaluation = Some(eval_res.final_eval);
         #[cfg(feature = "search-statistics")]
         {
@@ -509,9 +488,11 @@ pub fn null_move_pruning(
     tt_entry: &Option<CacheEntry>,
 ) -> SearchInstruction {
     if p.depth_left >= NULL_MOVE_PRUNING_DEPTH
-        && p.game_state.has_non_pawns(p.game_state.color_to_move)
+        && p.game_state.has_non_pawns(p.game_state.get_color_to_move())
         && static_evaluation.expect("null move static") * p.color >= p.beta
-        && (tt_entry.is_none() || !tt_entry.unwrap().alpha || tt_entry.unwrap().score >= p.beta)
+        && (tt_entry.is_none()
+            || !tt_entry.unwrap().is_lower_bound()
+            || tt_entry.unwrap().score >= p.beta)
     {
         let nextgs = make_nullmove(p.game_state);
         let rat = -principal_variation_search(
@@ -564,7 +545,7 @@ pub fn internal_iterative_deepening(
     }
     thread
         .history
-        .push(p.game_state.hash, p.game_state.half_moves == 0);
+        .push(p.game_state.get_hash(), p.game_state.get_half_moves() == 0);
     *tt_move = thread.pv_table[p.current_depth].pv[0];
     SearchInstruction::ContinueSearching
 }
@@ -590,6 +571,7 @@ pub fn compute_lmr_reduction(
     index: usize,
     iscp: bool,
     gives_check: bool,
+    in_check: bool,
 ) -> i16 {
     let mut reduction = ((f64::from(p.depth_left) / 2. - 1.).max(0.).sqrt()
         + (index as f64 / 2.0 - 1.).max(0.).sqrt()) as i16;
@@ -602,7 +584,11 @@ pub fn compute_lmr_reduction(
     if gives_check {
         reduction -= 1;
     }
-    if thread.history_score[p.game_state.color_to_move][mv.from as usize][mv.to as usize] > 0 {
+    if in_check {
+        reduction -= 2;
+    }
+    if thread.history_score[p.game_state.get_color_to_move()][mv.from as usize][mv.to as usize] > 0
+    {
         reduction -= 1;
     }
     reduction = reduction.min(p.depth_left - 1);
@@ -636,16 +622,16 @@ pub fn update_quiet_cutoff(
     mv: GameMove,
     quiets_tried: usize,
 ) {
-    thread.hh_score[p.game_state.color_to_move][mv.from as usize][mv.to as usize] +=
+    thread.hh_score[p.game_state.get_color_to_move()][mv.from as usize][mv.to as usize] +=
         p.depth_left as usize * p.depth_left as usize;
-    thread.history_score[p.game_state.color_to_move][mv.from as usize][mv.to as usize] +=
+    thread.history_score[p.game_state.get_color_to_move()][mv.from as usize][mv.to as usize] +=
         p.depth_left as isize * p.depth_left as isize;
     decrement_history_quiets(
         thread,
         p.current_depth,
         quiets_tried,
         p.depth_left as isize,
-        p.game_state.color_to_move,
+        p.game_state.get_color_to_move(),
     );
     if let Some(s) = thread.killer_moves[p.current_depth][0] {
         if mv == s {
