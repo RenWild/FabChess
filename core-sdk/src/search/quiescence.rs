@@ -34,8 +34,7 @@ pub fn q_search(mut p: CombinedSearchParameters, thread: &mut Thread) -> i16 {
     }
 
     //Step 5. Get standing pat when not in check
-    let stand_pat =
-        eval_game_state(&p.game_state, p.alpha * p.color, p.beta * p.color).final_eval * p.color;
+    let stand_pat = eval_game_state(&p.game_state).final_eval * p.color;
 
     //Step 6. Preliminary pruning
     if let SearchInstruction::StopSearching(res) = adjust_standpat(&mut p, stand_pat) {
@@ -212,7 +211,7 @@ pub fn best_move_value(state: &GameState) -> i16 {
 }
 
 #[inline(always)]
-pub fn passes_delta_pruning(capture_move: GameMove, phase: f64, eval: i16, alpha: i16) -> bool {
+pub fn passes_delta_pruning(capture_move: GameMove, phase: f32, eval: i16, alpha: i16) -> bool {
     if phase == 0.0 || eval >= alpha {
         return true;
     }

@@ -9,9 +9,7 @@ use core_sdk::search::reserved_memory::ReservedMoveList;
 use core_sdk::search::SearchInstruction;
 use core_sdk::search::{MAX_SEARCH_DEPTH, STANDARD_SCORE};
 use std::fs;
-use tuning::loading::{
-    load_positions, save_positions, FileFormatSupported, LabelledGameState, Statistics,
-};
+use tuning::loading::{save_positions, FileFormatSupported, LabelledGameState};
 
 //const FEN_DIR: &str = "D:/FenCollection/Real";
 const FEN_DIR: &str = "D:/FenCollection/Lichess";
@@ -20,17 +18,14 @@ fn main() {
     //2. Transform all FEN-Positions in Quiet positions
     //3. Save all positions just like loaded, all positions after q-search, all positions after q-search without stripped(no positions with >10 or <-10 eval)
     let mut positions: Vec<LabelledGameState> = Vec::with_capacity(8_000_000);
-    let mut stats = Statistics::default();
     let paths = fs::read_dir(FEN_DIR).unwrap();
     for path in paths {
-        load_positions(
+        tuning::loading::PositionLoader::new(
             &format!("{}", path.unwrap().path().display()),
             FileFormatSupported::EPD,
-            &mut positions,
-            &mut stats,
-        );
+        )
+        .load_positions(&mut positions);
     }
-    println!("{}", stats);
     println!("Positions: {}", positions.len());
     /*save_positions(
         &format!("{}/all_positions_noqsearch.txt", FEN_DIR),
@@ -102,7 +97,7 @@ pub fn stripped_q_search(
     }
     let incheck = game_state.in_check();
 
-    let static_evaluation = eval_game_state(&game_state, -16000, 16000);
+    let static_evaluation = eval_game_state(&game_state);
     //Standing pat pruning
     let stand_pat = static_evaluation.final_eval * color;
     if !incheck && stand_pat >= beta {
@@ -175,7 +170,7 @@ pub fn stripped_q_search(
 pub fn make_moves(
     game_state: &GameState,
     move_list: &mut MoveList,
-    phase: f64,
+    phase: f32,
     stand_pat: i16,
     alpha: i16,
     see_buffer: &mut Vec<i16>,
